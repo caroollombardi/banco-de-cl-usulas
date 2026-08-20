@@ -566,6 +566,9 @@ let DATA = [], PARECERES = [], EU = null;
 let st = { vista:"landing", aba:"minha", q:"", sel:null, abertos:new Set(), temasAbertos:new Set(),
            f:{ tipo:"", tema:"", estado:"", risco:"" } };
 let EDITANDO = null;
+let FICHA = null;                 // id da cláusula com a ficha aberta para edição
+let RENOM = { tipo:[], tema:[] }; // categorias listadas em Acervo, na ordem da tela
+let RENOMEANDO = null;            // { qual, de, para } enquanto renomeia categoria
 let HIST = [], CONFIG = [], PERFIS = [], ESTADOS = {}, DIVS = [], PERMS = [], PAPEIS = [], AUDIT = [];
 let FAVS = new Set(), RELS = [], BUSCA = null, SAUDE = null, SAUDE_TEMA = [];
 let cmpVersoes = { a:null, b:null };
@@ -835,7 +838,6 @@ function vai(v){
   if(v === "config" && ehAdmin()){
     if(!PERFIS.length) carregaPerfis();
     carregaSaude();
-    if(!REGRAS.length) carregaContribuicoes();
   }
 }
 async function carregaPerfis(){
@@ -1134,6 +1136,7 @@ function togTema(k){ st.temasAbertos.has(k) ? st.temasAbertos.delete(k) : st.tem
    ========================================================================= */
 async function abre(id){
   st.sel = id; st.vista = "detalhe"; HIST = [];
+  FICHA = null; EDITANDO = null;
   window.scrollTo(0,0); render();
   cmpVersoes = { a:null, b:null };
   carregaRelacionadas(id);
@@ -1172,6 +1175,7 @@ function htmlDetalhe(){
         <span class="clid">${c.id} · v${c.versao}</span>
         ${resp?`<span class="clid">Responsável: ${esc(resp.nome)}</span>`:""}
       </div>
+      ${FICHA === c.id ? blocoFicha(c) : ""}
       ${substituta ? `<div id="daviso">Esta cláusula foi substituída por
         <button class="glink" style="font-size:inherit;color:inherit" onclick="abre('${substituta.id}')">${esc(substituta.nome)} (${substituta.id})</button>.
         Use a redação vigente.</div>`
@@ -1286,6 +1290,8 @@ function htmlDetalhe(){
       <button class="act" onclick="alternaFav('${c.id}')">${FAVS.has(c.id)?"★ Salva":"☆ Salvar"}</button>
       ${podeEditar && EDITANDO !== c.id
         ? `<button class="act" onclick="EDITANDO='${c.id}';render()">Editar redação</button>` : ""}
+      ${podeEditar && FICHA !== c.id
+        ? `<button class="act" onclick="FICHA='${c.id}';window.scrollTo(0,0);render()">Editar nome e classificação</button>` : ""}
       ${c.status === "nova" && pode("editar_conteudo")
         ? `<button class="act" onclick="enviaParaValidacao('${c.id}')">Enviar para validação</button>` : ""}
       ${temVar?`<button class="act" onclick="comparar()">Comparar variações</button>`:""}
@@ -1297,6 +1303,73 @@ function htmlDetalhe(){
       <button class="act" onclick="vai('validacoes')">Voltar à lista</button>
     </div>
   </div>`;
+}
+
+/* ----------------------------------------------------------------------------
+   Ficha: nome, documento, tema e risco.
+   Até aqui esses campos só existiam no cadastro — uma cláusula batizada errado
+   ou arquivada no tema errado ficava assim para sempre, ou saía por SQL. Quem
+   edita conteúdo edita também a classificação.
+   O identificador não é recalculado de propósito: ele é a referência usada em
+   pareceres, histórico, favoritos e relações. Renumerar ao mover romperia tudo
+   isso para ganhar coerência estética.
+   ------------------------------------------------------------------------- */
+function blocoFicha(c){
+  const tipos = [...new Set(DATA.map(x=>x.tipo))].sort((a,b)=>a.localeCompare(b,"pt"));
+  const temas = [...new Set(DATA.map(x=>x.tema))].sort((a,b)=>a.localeCompare(b,"pt"));
+  const opc = (L, atual) => L.map(t=>`<option value="${esc(t)}" ${t===atual?"selected":""}>${esc(t)}</option>`).join("");
+  return `<div class="sec" style="margin-top:var(--s8)">
+    <div class="slabel">Nome e classificação</div>
+    <div style="max-width:720px;margin-top:var(--s4)">
+      <div class="ncampo">
+        <label for="fi-nome">Nome da cláusula</label>
+        <input id="fi-nome" type="text" value="${esc(c.nome)}"
+          onkeydown="if(event.key==='Enter'){event.preventDefault();salvaFicha('${c.id}')}">
+      </div>
+      <div class="ndupla">
+        <div class="ncampo">
+          <label for="fi-tipo">Documento</label>
+          <select id="fi-tipo">${opc(tipos, c.tipo)}</select>
+        </div>
+        <div class="ncampo">
+          <label for="fi-tema">Tema</label>
+          <select id="fi-tema">${opc(temas, c.tema)}</select>
+        </div>
+      </div>
+      <div class="ncampo" style="max-width:240px">
+        <label for="fi-risco">Risco</label>
+        <select id="fi-risco">${["Baixo","Médio","Alto"].map(r=>`<option ${c.risco===r?"selected":""}>${r}</option>`).join("")}</select>
+      </div>
+      <p class="admnota" style="margin-top:0">O identificador <b>${c.id}</b> não muda ao trocar de
+        documento ou de tema: é a referência usada nos pareceres, no histórico de versões e nas
+        cláusulas salvas do time. Só o lugar na árvore muda. Documento ou tema que ainda não
+        existe é criado na tela de cadastro, em Nova cláusula.</p>
+      <div style="display:flex;gap:8px;margin-top:var(--s4)">
+        <button class="act act-pri" style="width:auto" onclick="salvaFicha('${c.id}')">Salvar</button>
+        <button class="act" style="width:auto" onclick="FICHA=null;render()">Cancelar</button>
+      </div>
+    </div>
+  </div>`;
+}
+
+async function salvaFicha(id){
+  const c = DATA.find(x=>x.id===id); if(!c) return;
+  const nome  = (document.getElementById("fi-nome").value||"").trim();
+  const tipo  = document.getElementById("fi-tipo").value;
+  const tema  = document.getElementById("fi-tema").value;
+  const risco = document.getElementById("fi-risco").value;
+  if(!nome) return toast("O nome não pode ficar vazio.");
+  if(nome===c.nome && tipo===c.tipo && tema===c.tema && risco===c.risco){
+    FICHA = null; return render();
+  }
+  const { data, error } = await sb.from("clausulas")
+    .update({ nome, tipo, tema, risco, atualizado_por: EU.autor_id }).eq("id", id).select();
+  if(error) return toast("Não gravou: " + error.message);
+  if(!data || !data.length) return toast("Não gravou — sem permissão para editar conteúdo.");
+  const i = DATA.findIndex(x=>x.id===id); if(i>=0) DATA[i] = data[0];
+  FICHA = null;
+  toast(tipo!==c.tipo || tema!==c.tema ? "Cláusula atualizada e movida na árvore" : "Cláusula atualizada");
+  render();
 }
 
 /* Espelha fn_impedimento_validacao do banco. A checagem que vale é a de lá; esta
@@ -1678,22 +1751,104 @@ function admAuditoria(){
 function admAcervo(){
   const porTipo = {}, porTema = {};
   DATA.forEach(c=>{ porTipo[c.tipo]=(porTipo[c.tipo]||0)+1; porTema[c.tema]=(porTema[c.tema]||0)+1; });
-  const linhas = o => Object.keys(o).sort((a,b)=>o[b]-o[a])
-    .map(k=>`<tr><td>${esc(k)}</td><td class="num">${o[k]}</td></tr>`).join("");
-  return `<div class="slabel">Tipos de documento · ${Object.keys(porTipo).length}</div>
-    <table class="tab-lista"><thead><tr><th>Tipo</th><th>Cláusulas</th></tr></thead>
-      <tbody>${linhas(porTipo)}</tbody></table>
-    <div class="slabel" style="margin-top:32px">Temas · ${Object.keys(porTema).length}</div>
-    <table class="tab-lista"><thead><tr><th>Tema</th><th>Cláusulas</th></tr></thead>
-      <tbody>${linhas(porTema)}</tbody></table>
-    <p class="admnota">Renomear categoria propaga para todas as cláusulas e é operação de banco
-      (<code>fn_renomeia_tipo</code> e <code>fn_renomeia_tema</code>), disponível para coordenação
-      e sócio. Não coloquei o botão aqui de propósito: renomear <b>Outros</b>, que hoje concentra
-      78 cláusulas, é decisão de taxonomia a tomar com o time, não clique de tela. Quando a
-      decisão existir, a tela ganha o campo.</p>
+  RENOM.tipo = Object.keys(porTipo).sort((a,b)=>porTipo[b]-porTipo[a]);
+  RENOM.tema = Object.keys(porTema).sort((a,b)=>porTema[b]-porTema[a]);
+
+  const linhas = qual => {
+    const conta = qual === "tipo" ? porTipo : porTema;
+    return RENOM[qual].map((k,i)=>{
+      const editando = RENOMEANDO && RENOMEANDO.qual===qual && RENOMEANDO.de===k;
+      if(editando) return `<tr><td colspan="3" style="background:var(--paper2)">
+        <div class="ncatlinha">
+          <label class="sr" for="rn-nome">Novo nome</label>
+          <input id="rn-nome" value="${esc(RENOMEANDO.para)}" oninput="RENOMEANDO.para=this.value"
+            onkeydown="if(event.key==='Enter'){event.preventDefault();pedeRenomear()}
+                       if(event.key==='Escape'){RENOMEANDO=null;render()}">
+          <button class="act act-pri" style="width:auto;flex-shrink:0" onclick="pedeRenomear()">Renomear</button>
+          <button class="act" style="width:auto;flex-shrink:0" onclick="RENOMEANDO=null;render()">Cancelar</button>
+        </div>
+        <span class="nnota">Vale para as ${conta[k]} cláusulas ${qual==="tipo"?"deste tipo de documento":"deste tema"},
+          para todo o time. Nome igual ao de uma categoria existente funde as duas.</span></td></tr>`;
+      return `<tr><td>${esc(k)}</td><td class="num">${conta[k]}</td>
+        <td style="text-align:right">${ehAdmin()
+          ? `<button class="glink" style="font-size:var(--fs-sm)"
+              onclick="abreRenomear('${qual}',${i})">renomear</button>` : ""}</td></tr>`;
+    }).join("");
+  };
+
+  return `<div class="slabel">Tipos de documento · ${RENOM.tipo.length}</div>
+    <table class="tab-lista"><thead><tr><th>Tipo</th><th>Cláusulas</th><th></th></tr></thead>
+      <tbody>${linhas("tipo")}</tbody></table>
+    <div class="slabel" style="margin-top:32px">Temas · ${RENOM.tema.length}</div>
+    <table class="tab-lista"><thead><tr><th>Tema</th><th>Cláusulas</th><th></th></tr></thead>
+      <tbody>${linhas("tema")}</tbody></table>
+    <p class="admnota">Renomear propaga para todas as cláusulas da categoria e roda no banco
+      (<code>fn_renomeia_tipo</code> e <code>fn_renomeia_tema</code>), com registro na auditoria.
+      Renomear <b>Outros</b> é decisão de taxonomia a tomar com o time antes do clique, não
+      depois. Para mover uma cláusula isolada de tema, use "Editar nome e classificação" na
+      própria cláusula.</p>
     <p class="admnota">Status da cláusula e níveis de risco não são configuráveis: são tipos do
       banco, e criar um valor novo exige revisar políticas, gatilhos e telas. É migração pequena,
       mas explícita.</p>`;
+}
+
+function abreRenomear(qual, i){
+  const de = RENOM[qual][i];
+  if(!de) return;
+  RENOMEANDO = { qual, de, para: de };
+  render();
+  const el = document.getElementById("rn-nome");
+  if(el){ el.focus(); el.select(); }
+}
+
+function pedeRenomear(){
+  if(!RENOMEANDO) return;
+  const { qual, de } = RENOMEANDO;
+  const para = (RENOMEANDO.para||"").trim();
+  const rot = qual === "tipo" ? "tipo de documento" : "tema";
+  if(para.length < 3) return toast("Escreva o nome novo antes de renomear.");
+  if(para === de){ RENOMEANDO = null; return render(); }
+  const funde = RENOM[qual].includes(para);
+  confirma(funde ? "Fundir com categoria existente?" : "Renomear em todo o acervo?",
+    funde
+      ? `Já existe o ${rot} "${para}". As cláusulas de "${de}" passam a constar nele e "${de}" `+
+        `deixa de existir. A operação vale para todo o time e não tem desfazer automático.`
+      : `Todas as cláusulas de "${de}" passam a constar como "${para}". A mudança vale para todo `+
+        `o time e fica registrada na auditoria.`,
+    funde ? "Fundir" : "Renomear", executaRenomear);
+}
+
+/* A função existe no banco desde a migração de acervo, mas o nome dos parâmetros
+   não estava documentado aqui. Em vez de chutar um e entregar botão quebrado, a
+   chamada tenta as assinaturas plausíveis e para na primeira que o PostgREST
+   reconhece; erro que não seja de assinatura interrompe na hora. */
+async function rpcRenomeia(fn, de, para){
+  const tentativas = [{p_de:de,p_para:para},{p_antigo:de,p_novo:para},
+                      {p_nome:de,p_novo_nome:para},{p_atual:de,p_novo:para},{p_de:de,p_novo:para}];
+  let ultimo = "";
+  for(const args of tentativas){
+    const r = await sb.rpc(fn, args);
+    if(!r.error) return { ok:true };
+    ultimo = r.error.message || "erro sem mensagem";
+    const assinatura = r.error.code === "PGRST202"
+      || /could not find|does not exist|schema cache/i.test(ultimo);
+    if(!assinatura) return { ok:false, erro: ultimo };
+  }
+  return { ok:false, erro:`${fn} não aceitou nenhum dos nomes de parâmetro testados. Último retorno: ${ultimo}` };
+}
+
+async function executaRenomear(){
+  fechaConf();
+  if(!RENOMEANDO) return;
+  const { qual, de } = RENOMEANDO;
+  const para = (RENOMEANDO.para||"").trim();
+  const r = await rpcRenomeia(qual === "tipo" ? "fn_renomeia_tipo" : "fn_renomeia_tema", de, para);
+  if(!r.ok) return toast("Não renomeou: " + r.erro);
+  RENOMEANDO = null;
+  await carregaTudo();
+  st.vista = "config"; admAba = "acervo";
+  toast("Renomeado em todo o acervo");
+  render();
 }
 
 
